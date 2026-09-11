@@ -1,26 +1,43 @@
 """
-SatQuery AI — Ollama VLM Client
-================================
-Sends image + text queries to a local Ollama server.
-Primary model:  qwen2.5vl:7b
-Fallback chain: moondream -> llava:7b-v1.6-q4
+SatQuery AI — VLM Client
+=========================
+Sends image + text queries to a VLM.
+
+When CLOUD_VLM_ENABLED=true (default):
+  Primary:  Gemini 2.0 Flash (cloud, via google-generativeai)
+  Fallback: qwen2.5vl:7b -> qwen2.5vl:3b -> moondream (local Ollama)
+
+When CLOUD_VLM_ENABLED=false:
+  Primary:  qwen2.5vl:7b (local Ollama)
+  Fallback: qwen2.5vl:3b -> moondream
 
 Design decisions:
   - A threading Lock ensures only ONE VLM call runs at a time (VRAM OOM guard).
-  - Retries up to 2 times on the primary model before falling to the next model.
+  - Retries with exponential backoff on transient failures.
   - Timeout is per-attempt, not cumulative.
+  - Structured JSON output via Ollama's `format` parameter when a schema is provided.
+  - Short-answer validation/retry for non-yes/no questions.
 """
 
 import base64
 import io
+import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import ollama
 from PIL import Image
+
+# Load .env file (must happen before reading os.environ below)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    pass  # python-dotenv not installed, rely on system env vars
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +57,20 @@ FALLBACK_MODELS = DEFAULT_MODEL_FALLBACKS
 DEFAULT_TIMEOUT_S = 120          # seconds per attempt
 DEFAULT_MAX_RETRIES = 2          # retries on the *same* model before fallback
 MAX_IMAGE_DIM = 768              # resize longest edge — reduces VRAM usage significantly
-DEFAULT_NUM_CTX = 2048           # context window — 2048 saves ~1GB VRAM vs 4096
+DEFAULT_NUM_CTX = 4096           # context window — increased for detailed answers
+
+# Exponential backoff for transient failures
+BACKOFF_BASE_S = 2.0             # base delay (doubles each retry)
+BACKOFF_MAX_S = 16.0             # cap on delay
+
+# Short-answer validation
+MIN_ANSWER_WORDS = 15            # re-prompt if answer is shorter (non-yes/no)
+
+# Gemini Cloud (primary when enabled)
+CLOUD_VLM_ENABLED = os.environ.get("CLOUD_VLM_ENABLED", "false").lower() == "true"
+CLOUD_VLM_API_KEY = os.environ.get("CLOUD_VLM_API_KEY", "")
+CLOUD_VLM_MODEL = os.environ.get("CLOUD_VLM_MODEL", "gemini-3.6-flash")
+GEMINI_MAX_RETRIES = 3           # retries on Gemini before falling to local
 
 # Global lock — prevents parallel VLM calls (VRAM OOM protection)
 _vlm_lock = threading.Lock()
@@ -82,16 +112,32 @@ def _encode_image(image: Union[str, Path, Image.Image, bytes]) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+def _get_image_dimensions(image: Union[str, Path, Image.Image, bytes]) -> tuple:
+    """Return (width, height) of the original image before any resizing."""
+    if isinstance(image, (str, Path)):
+        pil_img = Image.open(image)
+    elif isinstance(image, bytes):
+        pil_img = Image.open(io.BytesIO(image))
+    elif isinstance(image, Image.Image):
+        pil_img = image
+    else:
+        return (0, 0)
+    return pil_img.size
+
+
 def _call_model(
     model: str,
     prompt: str,
     images_b64: Union[str, list],
     timeout: int,
     system_prompt: Optional[str] = None,
+    format_schema: Optional[Dict] = None,
 ) -> str:
     """Single attempt to call an Ollama model. Raises on failure/timeout.
 
     images_b64 can be a single base64 string or a list of them.
+    format_schema: if provided, passed as `format=` to ollama.chat for
+    structured JSON output.
     """
     if isinstance(images_b64, str):
         images_b64 = [images_b64]
@@ -105,16 +151,21 @@ def _call_model(
         "images": images_b64,
     })
 
+    # Build options
+    chat_kwargs = {
+        "model": model,
+        "messages": messages,
+        "options": {"num_ctx": DEFAULT_NUM_CTX},
+    }
+    if format_schema is not None:
+        chat_kwargs["format"] = format_schema
+
     # ollama.chat is synchronous; we enforce an external timeout via threading
     result_container = {"response": None, "error": None}
 
     def _run():
         try:
-            resp = ollama.chat(
-                model=model,
-                messages=messages,
-                options={"num_ctx": DEFAULT_NUM_CTX},
-            )
+            resp = ollama.chat(**chat_kwargs)
             result_container["response"] = resp["message"]["content"]
         except Exception as exc:
             result_container["error"] = exc
@@ -138,6 +189,114 @@ def _call_model(
     return response.strip()
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Check if an error is transient and worth retrying with backoff."""
+    transient_types = (TimeoutError, ConnectionError, ConnectionRefusedError, OSError)
+    if isinstance(exc, transient_types):
+        return True
+    exc_str = str(exc).lower()
+    return any(kw in exc_str for kw in ["timeout", "connection refused", "connection reset", "temporarily unavailable"])
+
+
+def _is_yes_no_question(prompt: str) -> bool:
+    """Heuristic: check if the question is inherently yes/no."""
+    prompt_lower = prompt.lower().strip()
+    return (
+        prompt_lower.startswith("is there") or
+        prompt_lower.startswith("are there") or
+        prompt_lower.startswith("does ") or
+        prompt_lower.startswith("do ") or
+        prompt_lower.startswith("can ") or
+        prompt_lower.startswith("has ") or
+        prompt_lower.startswith("have ") or
+        prompt_lower.startswith("will ") or
+        prompt_lower.startswith("was ") or
+        prompt_lower.startswith("were ")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cloud VLM — Gemini
+# ---------------------------------------------------------------------------
+
+def _call_cloud_vlm(
+    prompt: str,
+    images_b64: Union[str, list],
+    system_prompt: Optional[str] = None,
+    timeout: int = 60,
+) -> tuple:
+    """Call Google Gemini Vision API.
+
+    Used as the PRIMARY model when CLOUD_VLM_ENABLED=true.
+    Falls back to local Ollama only if Gemini fails after all retries.
+    Returns (answer_text, model_name_used).
+    """
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise RuntimeError(
+            "google-generativeai package not installed. "
+            "Install with: pip install google-generativeai"
+        )
+
+    if not CLOUD_VLM_API_KEY:
+        raise RuntimeError("CLOUD_VLM_API_KEY not set")
+
+    genai.configure(api_key=CLOUD_VLM_API_KEY)
+
+    if isinstance(images_b64, str):
+        images_b64 = [images_b64]
+
+    # Build content parts with decoded PIL images
+    parts = []
+    if system_prompt:
+        parts.append(f"[System Instructions]\n{system_prompt}\n\n[User Query]\n")
+    parts.append(prompt)
+
+    for img_b64 in images_b64:
+        try:
+            img_bytes = base64.b64decode(img_b64)
+            pil_img = Image.open(io.BytesIO(img_bytes))
+            parts.append(pil_img)
+        except Exception as exc:
+            logger.warning("Failed to decode image b64 for Gemini: %s", exc)
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": img_b64,
+                }
+            })
+
+    candidate_models = list(dict.fromkeys([
+        CLOUD_VLM_MODEL,
+        "gemini-3.6-flash",
+        "gemini-1.5-flash",
+        "gemini-flash-latest",
+    ]))
+
+    last_exc = None
+    for mdl_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(mdl_name)
+            response = model.generate_content(
+                parts,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=4096,
+                ),
+                request_options={"timeout": timeout},
+            )
+            if response and response.text:
+                return response.text.strip(), mdl_name
+            else:
+                raise RuntimeError(f"Empty response from Gemini ({mdl_name})")
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("Gemini candidate model %s attempt failed: %s", mdl_name, exc)
+
+    raise last_exc or RuntimeError("Gemini API failed for all model candidates")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -150,52 +309,121 @@ def query_vlm(
     model: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT_S,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    format_schema: Optional[Dict] = None,
+    validate_length: bool = False,
 ) -> dict:
     """Send an image + text query to the VLM and return the answer.
 
-    Parameters
-    ----------
-    prompt : str
-        The user's question or instruction.
-    image : str | Path | PIL.Image | bytes
-        The input image (path, PIL object, or raw bytes).
-    system_prompt : str, optional
-        An optional system message prepended to the conversation.
-    model : str, optional
-        Force a specific model (skips the fallback chain).
-    timeout : int
-        Seconds to wait per attempt before declaring a timeout.
-    max_retries : int
-        Retries on the *same* model before moving to the fallback.
+    When CLOUD_VLM_ENABLED=true:
+      1. Try Gemini cloud (up to GEMINI_MAX_RETRIES attempts with backoff)
+      2. If Gemini fails -> fall back to local Ollama chain
+
+    When CLOUD_VLM_ENABLED=false:
+      1. Try local Ollama chain only (primary -> fallback models)
 
     Returns
     -------
     dict
-        {"answer": str, "model_used": str, "elapsed_s": float}
+        {"answer": str, "model_used": str, "elapsed_s": float, "model_tier": str}
     """
-    # Build the ordered model list
-    if model:
-        models_to_try = [model]
-    else:
-        models_to_try = [PRIMARY_MODEL] + FALLBACK_MODELS
-
     image_b64 = _encode_image(image)
+    original_dims = _get_image_dimensions(image)
 
-    # Acquire the global lock — only one VLM call at a time
     with _vlm_lock:
         last_error = None
-        for mdl in models_to_try:
+
+        # ── STEP 1: Try Gemini FIRST when cloud is enabled ──────────────
+        if CLOUD_VLM_ENABLED and CLOUD_VLM_API_KEY and not model:
+            for attempt in range(1, GEMINI_MAX_RETRIES + 1):
+                logger.info(
+                    "Gemini cloud call: attempt=%d/%d  tier=primary",
+                    attempt, GEMINI_MAX_RETRIES,
+                )
+                t0 = time.perf_counter()
+                try:
+                    answer, used_model = _call_cloud_vlm(
+                        prompt, image_b64, system_prompt,
+                        timeout=min(timeout, 60),
+                    )
+                    elapsed = time.perf_counter() - t0
+                    logger.info("Gemini cloud success: model=%s elapsed=%.1fs", used_model, elapsed)
+                    return {
+                        "answer": answer,
+                        "model_used": used_model,
+                        "elapsed_s": round(elapsed, 2),
+                        "model_tier": "primary",
+                        "original_image_dims": original_dims,
+                    }
+                except Exception as exc:
+                    elapsed = time.perf_counter() - t0
+                    last_error = exc
+                    logger.warning(
+                        "Gemini attempt failed: attempt=%d  elapsed=%.1fs  error=%s",
+                        attempt, elapsed, exc,
+                    )
+                    # Backoff before retrying Gemini
+                    if attempt < GEMINI_MAX_RETRIES:
+                        delay = min(BACKOFF_BASE_S * (2 ** (attempt - 1)), BACKOFF_MAX_S)
+                        logger.info("Gemini transient error, backing off %.1fs", delay)
+                        time.sleep(delay)
+
+            logger.warning(
+                "All %d Gemini attempts exhausted, falling back to local Ollama.",
+                GEMINI_MAX_RETRIES,
+            )
+
+        # ── STEP 2: Local Ollama chain (fallback when cloud is on, primary when off)
+        if model:
+            models_to_try = [model]
+        else:
+            models_to_try = list(dict.fromkeys([PRIMARY_MODEL] + FALLBACK_MODELS))
+
+        for mdl_idx, mdl in enumerate(models_to_try):
+            # Tier depends on whether cloud was tried first
+            if CLOUD_VLM_ENABLED and CLOUD_VLM_API_KEY:
+                tier = "local-fallback"  # cloud was primary
+            elif mdl_idx == 0:
+                tier = "primary"         # no cloud, first local = primary
+            else:
+                tier = "local-fallback"
+
             for attempt in range(1, max_retries + 1):
                 logger.info(
-                    "VLM call: model=%s  attempt=%d/%d",
-                    mdl, attempt, max_retries,
+                    "VLM call: model=%s  attempt=%d/%d  tier=%s",
+                    mdl, attempt, max_retries, tier,
                 )
                 t0 = time.perf_counter()
                 try:
                     answer = _call_model(
-                        mdl, prompt, image_b64, timeout, system_prompt
+                        mdl, prompt, image_b64, timeout,
+                        system_prompt, format_schema,
                     )
                     elapsed = time.perf_counter() - t0
+
+                    # Short-answer validation/retry (Problem 2)
+                    if (validate_length and
+                            not _is_yes_no_question(prompt) and
+                            len(answer.split()) < MIN_ANSWER_WORDS and
+                            format_schema is None):
+                        logger.info(
+                            "Answer too short (%d words), re-prompting with elaboration",
+                            len(answer.split()),
+                        )
+                        elaboration_prompt = (
+                            f"Your previous answer was too brief. "
+                            f"Please provide a more detailed response.\n\n"
+                            f"Original question: {prompt}\n\n"
+                            f"Your brief answer was: {answer}\n\n"
+                            f"Now give a fuller answer with explanation and reasoning."
+                        )
+                        try:
+                            answer = _call_model(
+                                mdl, elaboration_prompt, image_b64, timeout,
+                                system_prompt, format_schema,
+                            )
+                        except Exception:
+                            pass  # keep original short answer
+
                     logger.info(
                         "VLM success: model=%s  elapsed=%.1fs", mdl, elapsed
                     )
@@ -203,6 +431,8 @@ def query_vlm(
                         "answer": answer.strip(),
                         "model_used": mdl,
                         "elapsed_s": round(elapsed, 2),
+                        "model_tier": tier,
+                        "original_image_dims": original_dims,
                     }
                 except Exception as exc:
                     elapsed = time.perf_counter() - t0
@@ -212,6 +442,10 @@ def query_vlm(
                         "elapsed=%.1fs  error=%s",
                         mdl, attempt, elapsed, exc,
                     )
+                    if _is_transient_error(exc) and attempt < max_retries:
+                        delay = min(BACKOFF_BASE_S * (2 ** (attempt - 1)), BACKOFF_MAX_S)
+                        logger.info("Transient error, backing off %.1fs", delay)
+                        time.sleep(delay)
 
             logger.warning(
                 "All %d attempts exhausted for model '%s', trying next fallback.",
@@ -232,39 +466,72 @@ def query_vlm_multi_image(
     model: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT_S,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    format_schema: Optional[Dict] = None,
 ) -> dict:
     """Send multiple images + a text query to the VLM.
 
     Same contract as query_vlm but accepts a list of images.
-    Used by change detection (before/after/diff) and SAR fusion tools.
-
-    Parameters
-    ----------
-    prompt : str
-        The user's question or instruction.
-    images : list[str | Path | PIL.Image | bytes]
-        List of images to include in the query.
-    system_prompt, model, timeout, max_retries : same as query_vlm.
-
-    Returns
-    -------
-    dict
-        {"answer": str, "model_used": str, "elapsed_s": float}
+    Uses the same Gemini-first -> Ollama-fallback order.
     """
     if not images:
         raise ValueError("At least one image is required")
-
-    # Build ordered model list
-    if model:
-        models_to_try = [model]
-    else:
-        models_to_try = [PRIMARY_MODEL] + FALLBACK_MODELS
 
     images_b64 = [_encode_image(img) for img in images]
 
     with _vlm_lock:
         last_error = None
-        for mdl in models_to_try:
+
+        # ── STEP 1: Try Gemini FIRST when cloud is enabled ──────────────
+        if CLOUD_VLM_ENABLED and CLOUD_VLM_API_KEY and not model:
+            for attempt in range(1, GEMINI_MAX_RETRIES + 1):
+                logger.info(
+                    "Gemini cloud multi-image call: images=%d  attempt=%d/%d",
+                    len(images_b64), attempt, GEMINI_MAX_RETRIES,
+                )
+                t0 = time.perf_counter()
+                try:
+                    answer, used_model = _call_cloud_vlm(
+                        prompt, images_b64, system_prompt,
+                        timeout=min(timeout, 60),
+                    )
+                    elapsed = time.perf_counter() - t0
+                    logger.info("Gemini cloud success (multi-image): model=%s elapsed=%.1fs", used_model, elapsed)
+                    return {
+                        "answer": answer,
+                        "model_used": used_model,
+                        "elapsed_s": round(elapsed, 2),
+                        "model_tier": "primary",
+                    }
+                except Exception as exc:
+                    elapsed = time.perf_counter() - t0
+                    last_error = exc
+                    logger.warning(
+                        "Gemini multi-image attempt failed: attempt=%d  error=%s",
+                        attempt, exc,
+                    )
+                    if attempt < GEMINI_MAX_RETRIES:
+                        delay = min(BACKOFF_BASE_S * (2 ** (attempt - 1)), BACKOFF_MAX_S)
+                        time.sleep(delay)
+
+            logger.warning(
+                "All %d Gemini attempts exhausted (multi-image), falling back to local Ollama.",
+                GEMINI_MAX_RETRIES,
+            )
+
+        # ── STEP 2: Local Ollama chain ──────────────────────────────────
+        if model:
+            models_to_try = [model]
+        else:
+            models_to_try = list(dict.fromkeys([PRIMARY_MODEL] + FALLBACK_MODELS))
+
+        for mdl_idx, mdl in enumerate(models_to_try):
+            if CLOUD_VLM_ENABLED and CLOUD_VLM_API_KEY:
+                tier = "local-fallback"
+            elif mdl_idx == 0:
+                tier = "primary"
+            else:
+                tier = "local-fallback"
+
             for attempt in range(1, max_retries + 1):
                 logger.info(
                     "VLM multi-image call: model=%s  images=%d  attempt=%d/%d",
@@ -273,7 +540,8 @@ def query_vlm_multi_image(
                 t0 = time.perf_counter()
                 try:
                     answer = _call_model(
-                        mdl, prompt, images_b64, timeout, system_prompt
+                        mdl, prompt, images_b64, timeout,
+                        system_prompt, format_schema,
                     )
                     elapsed = time.perf_counter() - t0
                     logger.info(
@@ -283,6 +551,7 @@ def query_vlm_multi_image(
                         "answer": answer.strip(),
                         "model_used": mdl,
                         "elapsed_s": round(elapsed, 2),
+                        "model_tier": tier,
                     }
                 except Exception as exc:
                     elapsed = time.perf_counter() - t0
@@ -292,6 +561,9 @@ def query_vlm_multi_image(
                         "elapsed=%.1fs  error=%s",
                         mdl, attempt, elapsed, exc,
                     )
+                    if _is_transient_error(exc) and attempt < max_retries:
+                        delay = min(BACKOFF_BASE_S * (2 ** (attempt - 1)), BACKOFF_MAX_S)
+                        time.sleep(delay)
 
             logger.warning(
                 "All %d attempts exhausted for model '%s', trying next fallback.",
@@ -326,5 +598,6 @@ if __name__ == "__main__":
     result = query_vlm(prompt=question, image=img_path)
 
     print(f"[OK] Model : {result['model_used']}")
+    print(f"[OK] Tier  : {result['model_tier']}")
     print(f"[OK] Time  : {result['elapsed_s']}s")
     print(f"[OK] Answer:\n{result['answer']}")

@@ -9,15 +9,18 @@ Two backends, tried in order:
      HuggingFace (hf_hub:cm93/resnet18-eurosat).  Tiny model (~44 MB),
      runs on CPU in <1 s, leaves VRAM free for VLM calls.
   2. VLM — if PyTorch/timm are missing or the model fails to load,
-     falls back to prompting qwen2.5vl with the EuroSAT label set.
+     falls back to prompting qwen2.5vl with the EuroSAT label set,
+     using structured JSON output for consistent confidence reporting.
 
-The public function `classify_scene` returns a dict with the same shape
-as `ask_vqa` (answer, raw_answer, model_used, elapsed_s, status, error)
-plus an extra `confidence` field, so the router can treat both tools
-uniformly.
+Both backends now report a unified `confidence_level` field
+(high/medium/low) so the GUI can display the same badge format
+regardless of which backend answered.
 """
 
+import json
 import logging
+import os
+import re
 import time
 from pathlib import Path
 from typing import Optional, Tuple, Union
@@ -30,6 +33,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from tools.geotiff_utils import load_geotiff, LoadedImage
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +89,16 @@ def _validate_image_path(path: Path) -> None:
             f"Unsupported image format: '{path.suffix}'. "
             f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
+
+
+def _softmax_to_confidence_level(prob: float) -> str:
+    """Convert a softmax probability to a human-readable confidence level."""
+    if prob >= 0.8:
+        return "high"
+    elif prob >= 0.5:
+        return "medium"
+    else:
+        return "low"
 
 
 # ---------------------------------------------------------------------------
@@ -162,22 +181,40 @@ def _classify_cnn(pil_image: Image.Image) -> Tuple[str, float, list]:
 
 
 # ---------------------------------------------------------------------------
-# Backend 2: VLM-based classification (fallback)
+# Backend 2: VLM-based classification (fallback) — with structured output
 # ---------------------------------------------------------------------------
 
 CLASSIFY_SYSTEM_PROMPT = (
     "You are a remote sensing image analyst specializing in land-cover "
     "classification. You classify satellite images into exactly one of "
-    "these categories: " + ", ".join(EUROSAT_CLASSES) + ". "
-    "Respond with ONLY the category name, nothing else. "
-    "Do not add any explanation."
+    "these EuroSAT categories: " + ", ".join(EUROSAT_CLASSES) + ".\n\n"
+    "RULES:\n"
+    "1. Choose the single most appropriate category.\n"
+    "2. Assess your confidence honestly (high/medium/low).\n"
+    "3. Explain briefly what visual features led to your classification.\n"
+    "4. If the image is ambiguous, say so in your reasoning and set "
+    "confidence to 'low'.\n"
+    "5. You MUST respond with valid JSON matching the schema provided."
 )
 
 CLASSIFY_PROMPT_TEMPLATE = (
-    "Classify this satellite image into exactly one land-cover category.\n"
-    "Choose ONLY from: {classes}\n\n"
-    "Reply with the category name only."
+    "Classify this satellite image into exactly one land-cover category.\n\n"
+    "Available categories: {classes}\n\n"
+    "Respond with a JSON object containing:\n"
+    "- \"class_name\": the category name (must be one of the listed categories)\n"
+    "- \"confidence\": one of \"high\", \"medium\", or \"low\"\n"
+    "- \"reasoning\": brief explanation of what visual features led to this classification"
 )
+
+CLASSIFY_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "class_name": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["class_name", "confidence", "reasoning"],
+}
 
 
 def _classify_vlm(
@@ -185,8 +222,11 @@ def _classify_vlm(
     model: Optional[str],
     timeout: int,
     max_retries: int,
-) -> Tuple[str, float, str, str, float]:
-    """Classify via VLM. Returns (class_name, confidence, raw_answer, model_used, elapsed)."""
+) -> Tuple[str, str, str, str, str, float]:
+    """Classify via VLM with structured output.
+    
+    Returns (class_name, confidence_level, reasoning, raw_answer, model_used, elapsed).
+    """
     from tools.ollama_client import query_vlm
 
     prompt = CLASSIFY_PROMPT_TEMPLATE.format(
@@ -200,20 +240,34 @@ def _classify_vlm(
         model=model,
         timeout=timeout,
         max_retries=max_retries,
+        format_schema=CLASSIFY_RESPONSE_SCHEMA,
     )
 
     raw = result["answer"]
     model_used = result["model_used"]
+    model_tier = result.get("model_tier", "primary")
     elapsed = result["elapsed_s"]
 
-    # Try to match the VLM output to one of the EuroSAT classes
-    matched_class = _match_vlm_output(raw)
+    clean_raw = raw.strip()
+    if clean_raw.startswith("```"):
+        clean_raw = re.sub(r"^```(?:json)?\s*", "", clean_raw, flags=re.IGNORECASE)
+        clean_raw = re.sub(r"\s*```$", "", clean_raw)
 
-    # VLM doesn't give real probabilities — use 0.0 as a sentinel
-    # to signal "this was a VLM guess, not a calibrated probability"
-    confidence = 0.0
+    # Try to parse structured response
+    try:
+        parsed = json.loads(clean_raw)
+        vlm_class = parsed.get("class_name", "")
+        confidence_level = parsed.get("confidence", "medium")
+        reasoning = parsed.get("reasoning", "")
+    except (json.JSONDecodeError, ValueError):
+        vlm_class = raw
+        confidence_level = "medium"
+        reasoning = f"Classification response from VLM model ({model_used})."
 
-    return matched_class, confidence, raw, model_used, elapsed
+    # Match to EuroSAT class
+    matched_class = _match_vlm_output(vlm_class)
+
+    return matched_class, confidence_level, reasoning, raw, model_used, elapsed, model_tier
 
 
 def _match_vlm_output(text: str) -> str:
@@ -309,15 +363,18 @@ def classify_scene(
     -------
     dict
         {
-            "answer": str,         # pretty class label
-            "raw_answer": str,     # unprocessed output (CNN class or VLM text)
-            "model_used": str,     # "eurosat-resnet18" or Ollama model name
-            "elapsed_s": float,    # time taken
-            "status": str,         # "ok" or "error"
-            "error": str | None,   # error message if status != "ok"
-            "confidence": float,   # softmax probability (CNN) or 0.0 (VLM)
-            "backend": str,        # "cnn" or "vlm"
-            "all_classes": list,   # top-N class probabilities (CNN only)
+            "answer": str,            # pretty class label
+            "raw_answer": str,        # unprocessed output (CNN class or VLM text)
+            "model_used": str,        # "eurosat-resnet18" or Ollama model name
+            "model_tier": str,        # "primary", "local-fallback", "cloud-fallback"
+            "elapsed_s": float,       # time taken
+            "status": str,            # "ok" or "error"
+            "error": str | None,      # error message if status != "ok"
+            "confidence": float,      # softmax probability (CNN) or 0.0 (VLM)
+            "confidence_level": str,  # "high", "medium", "low" (unified)
+            "reasoning": str,         # explanation for the classification
+            "backend": str,           # "cnn" or "vlm"
+            "all_classes": list,      # top-N class probabilities (CNN only)
         }
     """
     # --- Resolve image to PIL -----------------------------------------------
@@ -345,27 +402,46 @@ def classify_scene(
     # --- Choose backend ----------------------------------------------------
     t0 = time.perf_counter()
 
-    if not prefer_vlm and _load_cnn():
+    cloud_vlm_enabled = os.environ.get("CLOUD_VLM_ENABLED", "false").lower() == "true"
+    cloud_api_key = os.environ.get("CLOUD_VLM_API_KEY", "")
+    use_vlm_first = prefer_vlm or (cloud_vlm_enabled and bool(cloud_api_key))
+
+    if not use_vlm_first and _load_cnn():
         # ----- CNN path -----
         try:
             class_name, confidence, all_probs = _classify_cnn(pil_image)
             elapsed = time.perf_counter() - t0
 
             pretty = EUROSAT_LABELS_PRETTY.get(class_name, class_name)
+            conf_level = _softmax_to_confidence_level(confidence)
+
+            # Build reasoning from CNN probabilities
+            top3 = all_probs[:3]
+            top3_str = ", ".join(
+                f"{p['class']} ({p['probability']:.1%})" for p in top3
+            )
+            reasoning = (
+                f"CNN classifier (ResNet18-EuroSAT) predicted '{pretty}' "
+                f"with {confidence:.1%} softmax confidence. "
+                f"Top 3 predictions: {top3_str}."
+            )
 
             logger.info(
-                "Classify (CNN): class=%s  conf=%.3f  time=%.2fs",
-                class_name, confidence, elapsed,
+                "Classify (CNN): class=%s  conf=%.3f  level=%s  time=%.2fs",
+                class_name, confidence, conf_level, elapsed,
             )
 
             return {
                 "answer": pretty,
                 "raw_answer": class_name,
                 "model_used": "eurosat-resnet18",
+                "model_tier": "primary",
                 "elapsed_s": round(elapsed, 2),
                 "status": "ok",
                 "error": None,
                 "confidence": round(confidence, 4),
+                "confidence_level": conf_level,
+                "reasoning": reasoning,
                 "backend": "cnn",
                 "all_classes": all_probs,
             }
@@ -375,7 +451,7 @@ def classify_scene(
 
     # ----- VLM path -----
     try:
-        class_name, confidence, raw, model_used, elapsed = _classify_vlm(
+        class_name, conf_level, reasoning, raw, model_used, elapsed, model_tier = _classify_vlm(
             pil_image, model, timeout, max_retries
         )
         elapsed_total = time.perf_counter() - t0
@@ -383,7 +459,6 @@ def classify_scene(
         # Check if the match is a known EuroSAT class
         is_valid = class_name in EUROSAT_CLASSES
         pretty = EUROSAT_LABELS_PRETTY.get(class_name, class_name)
-        status = "ok" if is_valid else "ok"  # still "ok" — the answer is the best guess
 
         if not is_valid:
             logger.warning(
@@ -392,18 +467,21 @@ def classify_scene(
             )
 
         logger.info(
-            "Classify (VLM): class=%s  model=%s  time=%.2fs",
-            class_name, model_used, elapsed_total,
+            "Classify (VLM): class=%s  level=%s  model=%s  tier=%s  time=%.2fs",
+            class_name, conf_level, model_used, model_tier, elapsed_total,
         )
 
         return {
             "answer": pretty,
             "raw_answer": raw,
             "model_used": model_used,
+            "model_tier": model_tier,
             "elapsed_s": round(elapsed_total, 2),
-            "status": status,
+            "status": "ok",
             "error": None,
-            "confidence": round(confidence, 4),
+            "confidence": 0.0,  # VLM doesn't give calibrated probabilities
+            "confidence_level": conf_level,
+            "reasoning": reasoning,
             "backend": "vlm",
             "all_classes": [],
         }
@@ -419,10 +497,13 @@ def _error_result(msg: str, elapsed: float = 0.0) -> dict:
         "answer": "",
         "raw_answer": "",
         "model_used": "",
+        "model_tier": "",
         "elapsed_s": round(elapsed, 2),
         "status": "error",
         "error": msg,
         "confidence": 0.0,
+        "confidence_level": "low",
+        "reasoning": "",
         "backend": "",
         "all_classes": [],
     }
@@ -452,10 +533,11 @@ if __name__ == "__main__":
 
     print(f"  Status     : {res['status']}")
     print(f"  Backend    : {res['backend']}")
-    print(f"  Model      : {res['model_used']}")
+    print(f"  Model      : {res['model_used']} ({res['model_tier']})")
     print(f"  Time       : {res['elapsed_s']}s")
     print(f"  Class      : {res['answer']}")
-    print(f"  Confidence : {res['confidence']}")
+    print(f"  Confidence : {res['confidence']} ({res['confidence_level']})")
+    print(f"  Reasoning  : {res['reasoning']}")
     if res['all_classes']:
         print("  Top 5:")
         for entry in res['all_classes'][:5]:

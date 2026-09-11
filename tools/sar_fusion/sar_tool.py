@@ -324,19 +324,29 @@ def _narrate_comparison(
     timeout: int,
     max_retries: int,
 ) -> dict:
-    """Ask the VLM to describe the optical-SAR comparison."""
-    from tools.ollama_client import query_vlm_multi_image
+    """Ask Gemini to describe the optical-SAR comparison."""
+    from tools.gemini_client import analyze_image
 
     prompt = SAR_PROMPT.format(**stats)
 
-    return query_vlm_multi_image(
-        prompt=prompt,
+    result = analyze_image(
         images=[optical_pil, sar_pil, composite_pil],
-        system_prompt=SAR_SYSTEM_PROMPT,
-        model=model,
+        query=prompt,
+        image_mode="sar_optical",
         timeout=timeout,
-        max_retries=max_retries,
     )
+
+    if result["status"] == "ok" and result.get("analysis"):
+        answer = result["analysis"].get("direct_answer", "")
+        if not answer:
+            answer = result["analysis"].get("summary", "")
+        return {
+            "answer": answer,
+            "model_used": result.get("model_used", "gemini"),
+            "model_tier": "gemini",
+        }
+    else:
+        raise RuntimeError(result.get("error", "Gemini analysis failed"))
 
 
 # ---------------------------------------------------------------------------
@@ -431,13 +441,26 @@ def analyze_sar_optical(
                 vlm_result["model_used"], elapsed,
             )
 
+            # Derive confidence from stats
+            corr = abs(stats.get("correlation", 0))
+            edge_agree = stats.get("edge_agreement_pct", 0)
+            if corr > 0.5 and edge_agree > 80:
+                conf_level = "high"
+            elif corr > 0.2 or edge_agree > 60:
+                conf_level = "medium"
+            else:
+                conf_level = "low"
+
             return {
                 "answer": answer,
                 "raw_answer": vlm_result["answer"],
                 "model_used": vlm_result["model_used"],
+                "model_tier": vlm_result.get("model_tier", "primary"),
                 "elapsed_s": round(elapsed, 2),
                 "status": "ok",
                 "error": None,
+                "confidence_level": conf_level,
+                "reasoning": f"Correlation: {stats['correlation']}, Edge agreement: {stats['edge_agreement_pct']}%. VLM narration by {vlm_result['model_used']}.",
                 "composite": composite_pil,
                 "edge_comparison": edge_comp_pil,
                 "stats": stats,
@@ -461,13 +484,26 @@ def analyze_sar_optical(
 
     logger.info("SAR-optical analysis (CV-only) in %.1fs", elapsed)
 
+    # Derive confidence from stats
+    corr = abs(stats.get("correlation", 0))
+    edge_agree = stats.get("edge_agreement_pct", 0)
+    if corr > 0.5 and edge_agree > 80:
+        conf_level = "high"
+    elif corr > 0.2 or edge_agree > 60:
+        conf_level = "medium"
+    else:
+        conf_level = "low"
+
     return {
         "answer": summary,
         "raw_answer": summary,
         "model_used": "cv-only",
+        "model_tier": "primary",
         "elapsed_s": round(elapsed, 2),
         "status": "ok",
         "error": None,
+        "confidence_level": conf_level,
+        "reasoning": f"CV-only: Correlation {stats['correlation']}, Edge agreement {stats['edge_agreement_pct']}%.",
         "composite": composite_pil,
         "edge_comparison": edge_comp_pil,
         "stats": stats,
@@ -480,9 +516,12 @@ def _error_result(msg: str, elapsed: float = 0.0) -> dict:
         "answer": "",
         "raw_answer": "",
         "model_used": "",
+        "model_tier": "",
         "elapsed_s": round(elapsed, 2),
         "status": "error",
         "error": msg,
+        "confidence_level": "low",
+        "reasoning": "",
         "composite": None,
         "edge_comparison": None,
         "stats": {},

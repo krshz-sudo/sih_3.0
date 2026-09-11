@@ -288,19 +288,29 @@ def _narrate_changes(
     timeout: int,
     max_retries: int,
 ) -> dict:
-    """Ask the VLM to describe the changes. Returns query_vlm result dict."""
-    from tools.ollama_client import query_vlm_multi_image
+    """Ask Gemini to describe the changes."""
+    from tools.gemini_client import analyze_image
 
     prompt = CHANGE_PROMPT.format(change_pct=stats["change_pct"])
 
-    return query_vlm_multi_image(
-        prompt=prompt,
+    result = analyze_image(
         images=[before_pil, after_pil, overlay_pil],
-        system_prompt=CHANGE_SYSTEM_PROMPT,
-        model=model,
+        query=prompt,
+        image_mode="bitemporal",
         timeout=timeout,
-        max_retries=max_retries,
     )
+
+    if result["status"] == "ok" and result.get("analysis"):
+        answer = result["analysis"].get("direct_answer", "")
+        if not answer:
+            answer = result["analysis"].get("summary", "")
+        return {
+            "answer": answer,
+            "model_used": result.get("model_used", "gemini"),
+            "model_tier": "gemini",
+        }
+    else:
+        raise RuntimeError(result.get("error", "Gemini analysis failed"))
 
 
 # ---------------------------------------------------------------------------
@@ -389,13 +399,25 @@ def detect_changes(
                 stats["change_pct"], vlm_result["model_used"], elapsed,
             )
 
+            # Derive confidence from stats quality
+            change_pct = stats.get("change_pct", 0)
+            if 2.0 < change_pct < 80.0:
+                conf_level = "high"
+            elif 0.5 < change_pct <= 2.0 or 80.0 <= change_pct < 95.0:
+                conf_level = "medium"
+            else:
+                conf_level = "low"
+
             return {
                 "answer": vlm_result["answer"],
                 "raw_answer": vlm_result["answer"],
                 "model_used": vlm_result["model_used"],
+                "model_tier": vlm_result.get("model_tier", "primary"),
                 "elapsed_s": round(elapsed, 2),
                 "status": "ok",
                 "error": None,
+                "confidence_level": conf_level,
+                "reasoning": f"Change detection found {change_pct}% area changed. VLM narrated by {vlm_result['model_used']}.",
                 "change_map": overlay_pil,
                 "diff_image": diff_pil,
                 "change_mask": mask_pil,
@@ -417,13 +439,25 @@ def detect_changes(
     logger.info("Change detection (CV-only): %.1f%% changed in %.1fs",
                 stats["change_pct"], elapsed)
 
+    # Derive confidence from stats quality
+    change_pct = stats.get("change_pct", 0)
+    if 2.0 < change_pct < 80.0:
+        conf_level = "high"
+    elif 0.5 < change_pct <= 2.0 or 80.0 <= change_pct < 95.0:
+        conf_level = "medium"
+    else:
+        conf_level = "low"
+
     return {
         "answer": summary,
         "raw_answer": summary,
         "model_used": "cv-only",
+        "model_tier": "primary",
         "elapsed_s": round(elapsed, 2),
         "status": "ok",
         "error": None,
+        "confidence_level": conf_level,
+        "reasoning": f"CV-only analysis: {change_pct}% area changed (threshold {stats.get('threshold', 0):.0f}).",
         "change_map": overlay_pil,
         "diff_image": diff_pil,
         "change_mask": mask_pil,
@@ -437,9 +471,12 @@ def _error_result(msg: str, elapsed: float = 0.0) -> dict:
         "answer": "",
         "raw_answer": "",
         "model_used": "",
+        "model_tier": "",
         "elapsed_s": round(elapsed, 2),
         "status": "error",
         "error": msg,
+        "confidence_level": "low",
+        "reasoning": "",
         "change_map": None,
         "diff_image": None,
         "change_mask": None,
