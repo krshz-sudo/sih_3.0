@@ -150,7 +150,7 @@ async function init() {
   if (session) {
     // Authenticated state
     launchBtns.forEach(btn => {
-      btn.href = 'http://localhost:8501/';
+      btn.href = 'https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/';
     });
     
     // Add logout button to nav right

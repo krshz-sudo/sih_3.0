@@ -54,7 +54,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       showAlert('Password successfully updated!', false);
       
       setTimeout(() => {
-        window.location.href = 'http://localhost:8501/';
+        window.location.href = 'https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/';
       }, 2000);
       
     } catch (error) {

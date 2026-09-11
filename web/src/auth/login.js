@@ -63,8 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (error) throw error;
       
       // Redirect to Streamlit App upon successful login
-      // Local Streamlit runs on 8501
-      window.location.href = 'http://localhost:8501/';
+      window.location.href = 'https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/';
     } catch (error) {
       showAlert(error.message);
       btnSubmit.disabled = false;

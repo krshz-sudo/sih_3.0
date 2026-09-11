@@ -1,0 +1,3 @@
+libgdal-dev
+gdal-bin
+libgl1-mesa-glx

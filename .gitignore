@@ -40,3 +40,6 @@ web/dist/
 agent/
 .vscode/
 .idea/
+
+.vercel
+.env*
