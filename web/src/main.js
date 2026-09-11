@@ -4,6 +4,7 @@
  */
 import './style.css';
 import { SceneManager } from './scene/SceneManager.js';
+import { checkSession, handleLogout } from './auth/session.js';
 
 // ── DOM References ─────────────────────────────────────────
 const loadingScreen = document.getElementById('loading-screen');
@@ -141,6 +142,33 @@ async function init() {
 
   sceneManager.start();
   await sceneManager.loadAssets();
+
+  // ── Auth Handling ─────────────────────────────────────────
+  const session = await checkSession();
+  const launchBtns = document.querySelectorAll('#launch-btn, #hero-launch-btn');
+  
+  if (session) {
+    // Authenticated state
+    launchBtns.forEach(btn => {
+      btn.href = 'http://localhost:8501/';
+    });
+    
+    // Add logout button to nav right
+    const navRight = document.querySelector('.nav-right');
+    const logoutBtn = document.createElement('button');
+    logoutBtn.className = 'nav-cta';
+    logoutBtn.style.marginLeft = '12px';
+    logoutBtn.innerHTML = 'LOGOUT <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>';
+    logoutBtn.addEventListener('click', handleLogout('/index.html'));
+    navRight.appendChild(logoutBtn);
+    
+  } else {
+    // Unauthenticated state
+    launchBtns.forEach(btn => {
+      btn.href = '/login.html';
+      btn.target = '_self'; // Open login in same tab
+    });
+  }
 }
 
 init().catch((err) => {

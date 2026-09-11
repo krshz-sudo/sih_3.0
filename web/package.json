@@ -8,10 +8,16 @@
     "build": "vite build",
     "preview": "vite preview"
   },
-  "keywords": ["satellite", "SAR", "three.js", "gemini"],
+  "keywords": [
+    "satellite",
+    "SAR",
+    "three.js",
+    "gemini"
+  ],
   "author": "SatQuery AI Team",
   "license": "ISC",
   "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
     "postprocessing": "^6.39.5",
     "three": "^0.186.0"
   },
