@@ -21,6 +21,7 @@ Run:  streamlit run gui/app.py
 import csv
 import io
 import os
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"  # Prevent grpcio segfault on Streamlit Cloud
 import time
 import logging
 from datetime import datetime
