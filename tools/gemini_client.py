@@ -31,7 +31,13 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+try:
+    import streamlit as st
+    _st_secrets = st.secrets
+except ImportError:
+    _st_secrets = {}
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or _st_secrets.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 MAX_IMAGE_DIM = 1024          # resize longest edge
 MAX_RETRIES = 3
