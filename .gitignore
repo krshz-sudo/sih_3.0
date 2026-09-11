@@ -27,6 +27,12 @@ data/change_test_output/
 temp/
 scratch/
 
+# Web / Node
+node_modules/
+**/node_modules/
+dist/
+web/dist/
+
 # IDE & Agent folders
 .agent/
 .agents/
