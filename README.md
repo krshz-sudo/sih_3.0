@@ -1,158 +1,125 @@
-# SatQuery AI — Vision-Language SAR & Satellite Image Analysis
+<div align="center">
+  <img src="assets/banner.svg" alt="SatQuery AI Banner" width="100%" />
 
-> **SIH 2026 / ISRO Problem Statement 26167 Solution**  
-> An evidence-based, visual-grounding AI application for Synthetic Aperture Radar (SAR) and optical satellite imagery interpretation, powered exclusively by **Google Gemini 3.6 Flash Multimodal VLM**.
+  <h1>SatQuery AI v3.0</h1>
+  <p><strong>Evidence-based, visual-grounding AI application for Synthetic Aperture Radar (SAR) and optical satellite imagery.</strong></p>
+  
+  <p>
+    <a href="https://satquery-ai-v3.vercel.app"><img src="https://img.shields.io/badge/Live_Auth_Portal-Vercel-black?style=for-the-badge&logo=vercel" alt="Vercel App" /></a>
+    <a href="https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/"><img src="https://img.shields.io/badge/Live_Dashboard-Streamlit-FF4B4B?style=for-the-badge&logo=streamlit" alt="Streamlit App" /></a>
+  </p>
+
+  <p><em>Developed for SIH 2026 | ISRO Problem Statement 26167</em></p>
+</div>
 
 ---
 
 ## 📌 Project Overview
 
-**SatQuery AI** transforms complex satellite and SAR imagery into structured, evidence-grounded insights. Built specifically to handle radar backscatter characteristics, land-cover classification, change detection, and spatial feature localization, the system guarantees high-precision output with zero hallucinated locations or arbitrary facts.
+**SatQuery AI** transforms complex satellite and SAR imagery into structured, evidence-grounded insights. By leveraging the advanced multimodal capabilities of **Google Gemini 3.6 Flash**, the platform delivers high-precision output with zero hallucinated locations or arbitrary facts. 
 
-### 🌟 Key Capabilities & Functional Highlights
+Version 3.0 introduces a premium, cinematic **Vercel-hosted Landing & Authentication portal** seamlessly integrated with our powerful **Streamlit-hosted AI Engine**.
 
-1. **Pure Gemini 3.6 Flash Integration**
+<div align="center">
+  <img src="assets/gui-mockup.svg" alt="GUI Mockup" width="80%" />
+</div>
+
+---
+
+## 🌟 Key Capabilities & Functional Highlights
+
+1. **Dual-Node Architecture**
+   - **Auth Portal (Vercel)**: A cinematic, ultra-responsive React/Vite frontend secured by **Supabase OAuth** (Google Login).
+   - **AI Dashboard (Streamlit)**: Python-based visual grounding engine that processes user queries and satellite images.
+2. **Pure Gemini 3.6 Flash Integration**
    - Single unified AI engine handling image reasoning, Visual QA, object localization, land-cover estimation, and structured JSON output.
    - **No Ollama, CNNs, or secondary AI fallbacks** required.
-
-2. **Evidence-Based Interpretation Guardrails**
+3. **Evidence-Based Interpretation Guardrails**
    - Distinguishes strictly between **Direct Visual Evidence** and **Inferred Interpretation**.
    - Every detected feature carries an explicit status (`observed`, `inferred`, or `uncertain`) along with a calibrated numeric confidence score (`0.00` – `1.00`).
-   - Prevents inventing city names, river designations, acquisition dates, or unverified sensor metadata.
-
-3. **Visual Grounding & Automatic Bounding Boxes**
+4. **Visual Grounding & Automatic Bounding Boxes**
    - Automatically parses normalized coordinates (`0–1000`) returned by Gemini.
-   - Draws clear category-coded bounding boxes and labels onto the image (via PIL/OpenCV).
-
-4. **Side-by-Side Verification Interface**
-   - Interactive toggle to compare the original raw satellite image side-by-side with the annotated feature detection layer.
-
-5. **Quantitative Analytics & Plotly Charts**
-   - Dynamic charts rendering land-cover percentages, confidence distributions, and spatial metrics directly from Gemini's structured output.
-
-6. **One-Click Export Capabilities**
-   - Download high-resolution annotated satellite maps in PNG format.
-   - Export full feature extraction logs, evidence, and confidence ratings as CSV reports.
-
-7. **Multi-Modal Operational Modes**
+   - Draws clear category-coded bounding boxes and labels onto the image.
+5. **Multi-Modal Operational Modes**
    - **Single Image Analysis**: Deep inspection of SAR backscatter, texture, geometry, and land cover.
    - **Bi-Temporal Change Detection**: Before/after image analysis identifying structural or environmental changes.
    - **Optical + SAR Fusion**: Cross-modal comparative evaluation leveraging complementary sensor characteristics.
-
-8. **SAR Quick Analysis Presets**
-   - Instant query shortcuts for common remote-sensing tasks:
-     - *Identify major SAR-visible features*
-     - *Describe backscatter and texture patterns*
-     - *Identify possible built-up areas*
-     - *Identify water-like low-backscatter regions*
-     - *Identify major linear infrastructure*
-     - *Describe dominant land-cover patterns*
 
 ---
 
 ## 🏗️ Architecture & Data Flow
 
-```
-┌─────────────────┐       ┌─────────────────┐       ┌────────────────────────┐
-│  User Upload &  │  ───> │   Router Module │  ───> │  Gemini Client         │
-│  Query (UI)     │       │  (router.py)    │       │  (gemini_client.py)    │
-└─────────────────┘       └─────────────────┘       └────────────────────────┘
-                                                                │
-                                                        Google Gemini VLM
-                                                      (gemini-3.6-flash API)
-                                                                │
-                                                                ▼
-┌─────────────────┐       ┌─────────────────┐       ┌────────────────────────┐
-│  Streamlit UI   │  <─── │ Plotly Charts & │  <─── │  Structured JSON       │
-│  Display        │       │ Annotation Render│      │  Analysis Output       │
-└─────────────────┘       └─────────────────┘       └────────────────────────┘
-```
+Our platform is split into two primary environments to ensure high-performance UI and heavy-duty data processing are handled optimally.
+
+<div align="center">
+  <img src="assets/architecture.svg" alt="System Architecture" width="80%" />
+</div>
+
+### 1. Frontend: Auth & Landing (Vercel)
+The entry point to the application is a lightweight Vite frontend that handles user authentication.
+- **Tech Stack**: HTML, CSS, JavaScript, Vite, Supabase.
+- **Flow**: User lands on the cinematic video background page → Clicks "Continue with Google" → Authenticates via Supabase → Redirects securely to the Streamlit Dashboard.
+
+### 2. Backend: AI Engine (Streamlit)
+The core analysis engine where satellite imagery is uploaded and processed.
+- **Tech Stack**: Streamlit, Plotly, Pillow, OpenCV, Google Gemini API.
+- **Flow**: User uploads GeoTIFF/PNG/JPG → Selects Analysis Mode (Single, Bi-temporal, Fusion) → Gemini API processes the image → Structured JSON is parsed into charts, maps, and CSVs.
 
 ---
 
-## 📁 Repository Structure
+## ⚡ Quick Start & Local Setup
 
-```
-SIH/Demo/
-├── .env                       # Environment variables (Gemini API Key & Model)
-├── requirements.txt           # Required Python packages
-├── README.md                  # System documentation & setup guide
-├── gui/
-│   └── app.py                 # Streamlit UI dashboard
-├── router/
-│   └── router.py              # Query routing layer to Gemini engine
-├── tools/
-│   ├── gemini_client.py       # Sole AI inference client (System prompt + JSON schema)
-│   ├── annotation_renderer.py # Bounding box & mask visual grounding renderer
-│   ├── geotiff_utils.py       # GeoTIFF / TIFF satellite image loader
-│   ├── change/                # Bi-temporal change detection tool wrapper
-│   └── sar_fusion/            # Optical + SAR fusion tool wrapper
-└── data/                      # Sample satellite imagery & test datasets
-```
-
----
-
-## ⚡ Quick Start & Installation Guide
-
-### Prerequisites
-- Python **3.10** or higher
-- A valid **Google Gemini API Key**
-
-### 1. Clone the Repository
+### Option 1: Running the AI Engine (Streamlit)
 ```bash
-git clone https://github.com/krshz-sudo/sih_2.0.git
-cd sih_2.0
-```
+# 1. Clone the repository
+git clone https://github.com/krshz-sudo/sih_3.0.git
+cd sih_3.0
 
-### 2. Set Up Virtual Environment & Dependencies
-```bash
+# 2. Set up virtual environment
 python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# On Windows:
-venv\Scripts\activate
-
-# On Linux/macOS:
-source venv/bin/activate
-
-# Install dependencies:
+# 3. Install dependencies
 pip install -r requirements.txt
-```
 
-### 3. Configure Environment Variables
-Create or edit the `.env` file in the root directory:
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-3.6-flash
-```
+# 4. Configure Environment Variables
+# Create a .env file in the root directory:
+echo "GEMINI_API_KEY=your_gemini_api_key_here" > .env
+echo "GEMINI_MODEL=gemini-3.6-flash" >> .env
 
-### 4. Run the Application
-Launch the Streamlit dashboard:
-```bash
+# 5. Launch the Streamlit dashboard
 streamlit run gui/app.py
 ```
-Open your browser and navigate to: **`http://localhost:8501`**
+*Open your browser and navigate to: `http://localhost:8501`*
+
+### Option 2: Running the Auth Portal (Vite)
+```bash
+# 1. Navigate to the web directory
+cd web
+
+# 2. Install dependencies
+npm install
+
+# 3. Run the development server
+npm run dev
+```
+*Open your browser and navigate to: `http://localhost:5173`*
 
 ---
 
-## 🛠️ Tech Stack
+## 📱 Mobile Responsiveness
 
-- **Frontend / Dashboard**: Streamlit, Plotly
-- **Multimodal AI Engine**: Google Gemini API (`gemini-3.6-flash`)
-- **Image Processing & Visual Grounding**: Pillow, OpenCV, NumPy, GeoTIFF / GDAL Utilities
-- **Data Export**: Pandas, CSV, Pillow JPEG/PNG Encoders
-
----
-
-## 📊 Summary of Recent Updates
-
-- **Ollama Deprecation**: Completely removed local Ollama dependencies for faster, consistent cloud inference.
-- **Model Upgrade**: Switched to `gemini-3.6-flash` for guaranteed structured JSON response compliance and multi-token visual reasoning.
-- **Structured Schema Enforcer**: Gemini now returns strict `ANALYSIS_SCHEMA` including observations, features, land cover, statistics, CSV rows, and limitations.
-- **Improved Grounding**: Bounding boxes scale accurately to high-resolution satellite inputs.
+Version 3.0 has been meticulously optimized for both Desktop and Mobile experiences.
+- The **Auth Portal** features dynamic media queries, seamless scrolling, and touch-optimized buttons that guarantee zero overlapping or clipped elements on mobile displays.
+- The **Streamlit Dashboard** automatically collapses sidebars and restructures Plotly charts to fit small viewports natively.
 
 ---
 
 ## 🤝 Contribution & License
 
 Developed for **Smart India Hackathon (SIH 2026)** — Problem Statement 26167 (ISRO).  
-Maintained by the SatQuery AI Team.
+Maintained by the **SatQuery AI Team**.
+
+<p align="center">
+  <sub>Built with ❤️ and 🛰️</sub>
+</p>
