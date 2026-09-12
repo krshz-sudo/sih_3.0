@@ -248,7 +248,7 @@ button { background: none; border: none; color: inherit; cursor: pointer; font-f
   .sidebar { display: none; }
   
   /* Optimize hero section for mobile spacing and touch targets */
-  .hero { left: 14px; right: 14px; bottom: calc(70px + env(safe-area-inset-bottom, 0px)); max-width: 100%; }
+  .hero { left: 14px; right: 14px; bottom: calc(85px + env(safe-area-inset-bottom, 0px)); max-width: 100%; }
   .hero-title { font-size: 1.7rem; }
   .hero-cta { width: 100%; justify-content: center; min-height: 48px; }
   

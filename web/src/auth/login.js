@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const { error } = await supabase.auth.signInWithOAuth({
           provider: 'google',
           options: {
-            redirectTo: 'https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/'
+            redirectTo: window.location.origin
           }
         });
         if (error) throw error;
