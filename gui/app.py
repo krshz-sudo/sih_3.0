@@ -63,7 +63,7 @@ html, body, p, div, span, label, input, button, textarea, select {
 code, pre, .mono { font-family: 'JetBrains Mono', monospace; }
 
 #MainMenu { visibility: hidden; }
-header { visibility: hidden; }
+/* header { visibility: hidden; } */
 footer { visibility: hidden; }
 
 .stApp {
@@ -444,8 +444,6 @@ def _validate():
 
 
 if submit and _validate():
-    st.markdown("---")
-
     with st.spinner("🛰️ Analyzing with Gemini..."):
         progress = st.progress(0, text="Sending to Gemini...")
         t_start = time.perf_counter()
@@ -468,19 +466,32 @@ if submit and _validate():
             <p>{result.get('error', 'Unknown error')}</p>
         </div>
         """, unsafe_allow_html=True)
+        st.session_state.pop("current_analysis", None)
+        st.session_state.pop("current_result", None)
         st.stop()
 
     analysis = result.get("analysis", {})
     if not analysis:
         st.error("Gemini returned an empty analysis. Please try again.")
+        st.session_state.pop("current_analysis", None)
+        st.session_state.pop("current_result", None)
         st.stop()
 
-    model_used = result.get("model_used", "gemini")
-    elapsed_s = result.get("elapsed_s", elapsed)
+    result["elapsed_s"] = result.get("elapsed_s", elapsed)
 
     # Store in session for interactivity
     st.session_state["current_analysis"] = analysis
     st.session_state["current_result"] = result
+    st.session_state["analyzed_images"] = images_loaded
+
+analysis = st.session_state.get("current_analysis", {})
+result = st.session_state.get("current_result", {})
+analyzed_images = st.session_state.get("analyzed_images", images_loaded)
+
+if analysis and result:
+    st.markdown("---")
+    model_used = result.get("model_used", "gemini")
+    elapsed_s = result.get("elapsed_s", 0.0)
 
     # ── Metrics Row ─────────────────────────────────────────────────────
     features = analysis.get("features", [])
@@ -498,7 +509,7 @@ if submit and _validate():
         st.markdown(f'<div class="stat-box"><div class="stat-value" style="color:{c}">{avg_conf:.0%}</div><div class="stat-label">Avg Confidence</div></div>', unsafe_allow_html=True)
 
     # ── Side-by-Side: Original vs Annotated ─────────────────────────────
-    if features and images_loaded:
+    if features and analyzed_images:
         st.markdown("#### 🖼️ Image Analysis")
 
         # Annotation controls
@@ -518,7 +529,7 @@ if submit and _validate():
                 highlight_id = None
 
         annotated = render_annotations(
-            images_loaded[0], features,
+            analyzed_images[0], features,
             show_boxes=show_boxes, show_masks=show_masks,
             show_labels=show_labels, highlight_id=highlight_id,
         )
@@ -527,7 +538,7 @@ if submit and _validate():
         with col_orig:
             st.markdown('<div class="glass-card" style="text-align:center">', unsafe_allow_html=True)
             st.markdown('<div style="color:#64748B;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.4rem;">Original</div>', unsafe_allow_html=True)
-            st.image(images_loaded[0], use_container_width=True)
+            st.image(analyzed_images[0], use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col_ann:
@@ -736,7 +747,7 @@ if submit and _validate():
     with st.expander("🔧 Debug / Raw Gemini Output"):
         st.json(analysis)
 
-elif not submit:
+elif not analysis:
     # ── Welcome state ───────────────────────────────────────────────────
     if not images_loaded:
         st.markdown("""
