@@ -199,3 +199,19 @@ button { background: none; border: none; color: inherit; cursor: pointer; font-f
 /* ── Links ────────────────────────────────────────────────── */
 .auth-footer { margin-top: 32px; text-align: center; font-size: 0.9rem; color: var(--c-text-dim); }
 .auth-links { display: flex; justify-content: space-between; font-size: 0.85rem; margin-top: 4px; }
+
+/* ── Mobile ───────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .auth-right {
+    padding: 24px 16px;
+  }
+  .auth-title {
+    font-size: 1.5rem;
+  }
+  .auth-subtitle {
+    font-size: 0.85rem;
+  }
+  .btn-primary, .btn-google {
+    min-height: 48px;
+  }
+}

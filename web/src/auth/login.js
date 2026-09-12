@@ -10,6 +10,19 @@ document.addEventListener('DOMContentLoaded', () => {
     alertBox.className = `auth-alert ${isError ? 'error' : 'success'}`;
   }
 
+  // Auto-redirect if already logged in (fixes the loop)
+  supabase.auth.getSession().then(({ data: { session } }) => {
+    if (session) {
+      window.location.href = 'https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/';
+    }
+  });
+
+  supabase.auth.onAuthStateChange((event, session) => {
+    if (session) {
+      window.location.href = 'https://krshz-sudo-sih-3-0-guiapp-0esz5j.streamlit.app/';
+    }
+  });
+
   // Google OAuth
   if (btnGoogle) {
     btnGoogle.addEventListener('click', async () => {
